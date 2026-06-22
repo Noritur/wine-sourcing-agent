@@ -1,4 +1,4 @@
-import { ToolLoopAgent, tool, Output, stepCountIs, gateway } from "ai";
+import { streamText, tool, Output, stepCountIs, gateway } from "ai";
 import { z } from "zod";
 import { findWines, landedCost, WINES } from "./market-data";
 
@@ -81,10 +81,7 @@ const recommendationSchema = z.object({
 
 export type SourcingRecommendation = z.infer<typeof recommendationSchema>;
 
-export const sourcingAgent = new ToolLoopAgent({
-  model: gateway("anthropic/claude-haiku-4.5"),
-  stopWhen: stepCountIs(5),
-  instructions: `You are a fine-wine sourcing analyst for a high-end UK wine merchant. You find the cheapest reliable way to land a wine in the UK.
+const sourcingInstructions = `You are a fine-wine sourcing analyst for a high-end UK wine merchant. You find the cheapest reliable way to land a wine in the UK.
 
 Process:
 1. Call sourceWine once with the user's query and quantity. It returns the matched wine and every supplier's all-in landed cost (GBP) plus stock/MOQ flags.
@@ -94,7 +91,16 @@ Process:
 Rules:
 - Use the EXACT numbers from the tool. Never invent or round away figures.
 - Caveats must be specific and commercially useful (customs/Brexit clearance on EU imports, provenance/OWC, label condition vs resale value, thin stock buffer, lead-time, VAT reclaim for bonded resale) — no filler like "all suppliers have stock".
-- Keep the summary sharp and commercial: this goes to a buyer who wants to make money.`,
-  tools: { sourceWine },
-  output: Output.object({ schema: recommendationSchema }),
-});
+- Keep the summary sharp and commercial: this goes to a buyer who wants to make money.`;
+
+export function streamSourcing(prompt: string) {
+  return streamText({
+    model: gateway("anthropic/claude-haiku-4.5"),
+    system: sourcingInstructions,
+    tools: { sourceWine },
+    output: Output.object({ schema: recommendationSchema }),
+    stopWhen: stepCountIs(5),
+    prompt,
+    onError: ({ error }) => console.error("sourcing stream error", error),
+  });
+}

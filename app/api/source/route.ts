@@ -1,4 +1,5 @@
-import { sourcingAgent } from "@/lib/agent";
+import { streamSourcing } from "@/lib/agent";
+import type { SourcingRecommendation } from "@/lib/agent";
 
 export const maxDuration = 60;
 
@@ -28,22 +29,61 @@ export async function POST(req: Request) {
 
   const prompt = `Source ${quantity} bottle(s) of "${wine}", landed in the United Kingdom (London). Identify the wine, compare every supplier's all-in landed cost, recommend the cheapest viable source, and quantify the arbitrage versus the most expensive listing.`;
 
-  try {
-    const result = await sourcingAgent.generate({ prompt });
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (obj: unknown) =>
+        controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
 
-    // Lightweight trace of which tools the agent actually called.
-    type StepLike = { toolCalls?: Array<{ toolName: string; input: unknown }> };
-    const steps = (result as { steps?: StepLike[] }).steps ?? [];
-    const trace = steps.flatMap((s) =>
-      (s.toolCalls ?? []).map((tc) => ({ tool: tc.toolName, input: tc.input })),
-    );
+      try {
+        send({ type: "status", text: "Scanning suppliers across markets…" });
 
-    return Response.json({ output: result.output, trace });
-  } catch (err) {
-    console.error("sourcing agent error", err);
-    return Response.json(
-      { error: "The sourcing agent failed. Please try again." },
-      { status: 500 },
-    );
-  }
+        const result = streamSourcing(prompt);
+
+        let last: Partial<SourcingRecommendation> | undefined;
+        let announcedWriting = false;
+        for await (const partial of result.partialOutputStream) {
+          last = partial as Partial<SourcingRecommendation>;
+          if (!announcedWriting) {
+            announcedWriting = true;
+            send({ type: "status", text: "Computing landed cost · ranking…" });
+          }
+          send({ type: "partial", output: partial });
+        }
+
+        // The recommendation is usable only once the model has produced the
+        // recommended supplier and a summary.
+        if (!last?.recommended?.supplier || !last?.summary) {
+          send({
+            type: "error",
+            error: "The sourcing agent failed. Please try again.",
+          });
+          controller.close();
+          return;
+        }
+
+        const steps = await result.steps;
+        const trace = steps.flatMap((s) =>
+          (s.toolCalls ?? []).map((tc) => ({ tool: tc.toolName })),
+        );
+        send({ type: "trace", trace });
+        send({ type: "done" });
+      } catch (err) {
+        console.error("sourcing stream error", err);
+        send({
+          type: "error",
+          error: "The sourcing agent failed. Please try again.",
+        });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
 }

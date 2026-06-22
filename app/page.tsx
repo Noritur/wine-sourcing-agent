@@ -3,11 +3,8 @@
 import { useState } from "react";
 import type { SourcingRecommendation } from "@/lib/agent";
 
-type ApiResponse = {
-  output?: SourcingRecommendation;
-  trace?: { tool: string; input: unknown }[];
-  error?: string;
-};
+type Partial2<T> = { [K in keyof T]?: T[K] };
+type PartialRec = Partial2<SourcingRecommendation>;
 
 const FLAG: Record<string, string> = {
   FR: "🇫🇷",
@@ -26,21 +23,25 @@ const EXAMPLES = [
   { wine: "Vega Sicilia Único 2014", quantity: 12 },
 ];
 
-const gbp = (n: number) =>
-  new Intl.NumberFormat("en-GB", {
-    style: "currency",
-    currency: "GBP",
-    maximumFractionDigits: 2,
-  }).format(n);
+const gbp = (n?: number) =>
+  typeof n === "number" && Number.isFinite(n)
+    ? new Intl.NumberFormat("en-GB", {
+        style: "currency",
+        currency: "GBP",
+        maximumFractionDigits: 2,
+      }).format(n)
+    : "…";
 
-const flag = (c: string) => FLAG[c] ?? "🏳️";
+const flag = (c?: string) => (c ? (FLAG[c] ?? "🏳️") : "");
 
 export default function Home() {
   const [wine, setWine] = useState("Sassicaia 2019");
   const [quantity, setQuantity] = useState(24);
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<SourcingRecommendation | null>(null);
-  const [trace, setTrace] = useState<{ tool: string; input: unknown }[]>([]);
+  const [status, setStatus] = useState("");
+  const [data, setData] = useState<PartialRec | null>(null);
+  const [trace, setTrace] = useState<{ tool: string }[]>([]);
+  const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function run(w = wine, q = quantity) {
@@ -48,18 +49,48 @@ export default function Home() {
     setError(null);
     setData(null);
     setTrace([]);
+    setDone(false);
+    setStatus("Connecting to the sourcing agent…");
     try {
       const res = await fetch("/api/source", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ wine: w, quantity: q }),
       });
-      const json: ApiResponse = await res.json();
-      if (!res.ok || json.error || !json.output) {
-        setError(json.error ?? "Something went wrong.");
-      } else {
-        setData(json.output);
-        setTrace(json.trace ?? []);
+      if (!res.ok || !res.body) {
+        setError("Something went wrong. Please try again.");
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let msg: {
+            type: string;
+            text?: string;
+            output?: PartialRec;
+            trace?: { tool: string }[];
+            error?: string;
+          };
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (msg.type === "status" && msg.text) setStatus(msg.text);
+          else if (msg.type === "partial" && msg.output) setData(msg.output);
+          else if (msg.type === "trace") setTrace(msg.trace ?? []);
+          else if (msg.type === "error")
+            setError(msg.error ?? "Something went wrong.");
+          else if (msg.type === "done") setDone(true);
+        }
       }
     } catch {
       setError("Network error. Please try again.");
@@ -67,6 +98,14 @@ export default function Home() {
       setLoading(false);
     }
   }
+
+  const rec = data?.recommended;
+  const arb = data?.arbitrage;
+  const alts = Array.isArray(data?.alternatives) ? data!.alternatives : [];
+  const caveats = Array.isArray(data?.caveats) ? data!.caveats : [];
+  const showResult = !!data && !error;
+  // The initial "working" banner shows until the recommended source streams in.
+  const showWorking = loading && !rec?.supplier && !error;
 
   return (
     <main className="mx-auto w-full max-w-3xl px-5 py-12 sm:py-16">
@@ -148,112 +187,132 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Loading */}
-      {loading && (
-        <div className="mt-8 animate-pulse rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-6 text-sm text-[var(--muted)]">
-          <p className="serif text-lg text-[var(--text)]">The agent is working…</p>
-          <p className="mt-2">
-            Identifying the wine · querying global suppliers · converting FX ·
-            adding freight, duty &amp; VAT · ranking by landed cost.
+      {/* Working banner (until the recommendation starts streaming in) */}
+      {showWorking && (
+        <div className="mt-8 rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-6">
+          <p className="serif flex items-center gap-2 text-lg text-[var(--text)]">
+            <span className="inline-block h-2 w-2 animate-ping rounded-full bg-[var(--gold)]" />
+            {status || "The agent is working…"}
+          </p>
+          <p className="mt-2 text-sm text-[var(--muted)]">
+            A live Claude agent is querying suppliers, converting FX and adding
+            freight, duty &amp; VAT — then ranking by landed cost.
           </p>
         </div>
       )}
 
       {/* Error */}
-      {error && !loading && (
+      {error && (
         <div className="mt-8 rounded-2xl border border-red-900/50 bg-red-950/30 p-5 text-sm text-red-200">
           {error}
         </div>
       )}
 
-      {/* Result */}
-      {data && !loading && (
+      {/* Result (renders progressively as fields stream in) */}
+      {showResult && (
         <section className="mt-8 space-y-5">
           {/* Matched wine */}
-          <div>
-            <div className="text-xs uppercase tracking-wider text-[var(--muted)]">
-              Matched
-            </div>
-            <h2 className="serif text-2xl text-[var(--text)]">
-              {data.matchedWine.name}
-            </h2>
-            <div className="text-sm text-[var(--muted)]">
-              {data.matchedWine.producer} · {data.matchedWine.region} ·{" "}
-              {data.matchedWine.vintage}
-            </div>
-          </div>
-
-          {/* Recommended */}
-          <div className="overflow-hidden rounded-2xl border border-[var(--gold)]/40 bg-gradient-to-b from-[var(--panel-2)] to-[var(--panel)] shadow-2xl shadow-black/40">
-            <div className="border-b border-[var(--border)] px-5 py-2 text-xs uppercase tracking-[0.2em] text-[var(--gold-soft)]">
-              Recommended source
-            </div>
-            <div className="grid gap-5 p-5 sm:grid-cols-[1fr_auto] sm:items-center">
-              <div>
-                <div className="serif text-xl text-[var(--text)]">
-                  {flag(data.recommended.country)} {data.recommended.supplier}
-                </div>
-                <p className="mt-1.5 text-sm leading-relaxed text-[var(--muted)]">
-                  {data.recommended.reason}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-[var(--muted)]">
-                  <span>Lead time: {data.recommended.leadDays} days</span>
-                  <span>· {data.recommended.condition}</span>
-                </div>
-              </div>
-              <div className="sm:text-right">
-                <div className="tnum serif text-3xl text-[var(--gold-soft)]">
-                  {gbp(data.recommended.landedUnitGBP)}
-                </div>
-                <div className="text-xs text-[var(--muted)]">landed / bottle</div>
-                <div className="tnum mt-2 text-lg text-[var(--text)]">
-                  {gbp(data.recommended.totalGBP)}
-                </div>
-                <div className="text-xs text-[var(--muted)]">order total</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Arbitrage */}
-          <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--border)] bg-[var(--panel)] px-5 py-4">
+          {data?.matchedWine?.name && (
             <div>
               <div className="text-xs uppercase tracking-wider text-[var(--muted)]">
-                Arbitrage vs the priciest source
+                Matched
               </div>
-              <div className="mt-1 text-sm text-[var(--muted)]">
-                {data.arbitrage.note}
+              <h2 className="serif text-2xl text-[var(--text)]">
+                {data.matchedWine.name}
+              </h2>
+              <div className="text-sm text-[var(--muted)]">
+                {[
+                  data.matchedWine.producer,
+                  data.matchedWine.region,
+                  data.matchedWine.vintage,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               </div>
             </div>
-            <div className="text-right">
-              <div className="tnum serif text-2xl text-[var(--gold-soft)]">
-                {gbp(data.arbitrage.totalSavingGBP)}
+          )}
+
+          {/* Recommended */}
+          {rec?.supplier && (
+            <div className="overflow-hidden rounded-2xl border border-[var(--gold)]/40 bg-gradient-to-b from-[var(--panel-2)] to-[var(--panel)] shadow-2xl shadow-black/40">
+              <div className="border-b border-[var(--border)] px-5 py-2 text-xs uppercase tracking-[0.2em] text-[var(--gold-soft)]">
+                Recommended source
               </div>
-              <div className="text-xs text-[var(--muted)]">
-                saved ({gbp(data.arbitrage.savingPerBottleGBP)}/btl)
+              <div className="grid gap-5 p-5 sm:grid-cols-[1fr_auto] sm:items-center">
+                <div>
+                  <div className="serif text-xl text-[var(--text)]">
+                    {flag(rec.country)} {rec.supplier}
+                  </div>
+                  {rec.reason && (
+                    <p className="mt-1.5 text-sm leading-relaxed text-[var(--muted)]">
+                      {rec.reason}
+                    </p>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-[var(--muted)]">
+                    {typeof rec.leadDays === "number" && (
+                      <span>Lead time: {rec.leadDays} days</span>
+                    )}
+                    {rec.condition && <span>· {rec.condition}</span>}
+                  </div>
+                </div>
+                <div className="sm:text-right">
+                  <div className="tnum serif text-3xl text-[var(--gold-soft)]">
+                    {gbp(rec.landedUnitGBP)}
+                  </div>
+                  <div className="text-xs text-[var(--muted)]">landed / bottle</div>
+                  <div className="tnum mt-2 text-lg text-[var(--text)]">
+                    {gbp(rec.totalGBP)}
+                  </div>
+                  <div className="text-xs text-[var(--muted)]">order total</div>
+                </div>
               </div>
             </div>
-          </div>
+          )}
+
+          {/* Arbitrage */}
+          {arb && (typeof arb.totalSavingGBP === "number" || arb.note) && (
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--border)] bg-[var(--panel)] px-5 py-4">
+              <div>
+                <div className="text-xs uppercase tracking-wider text-[var(--muted)]">
+                  Arbitrage vs the priciest source
+                </div>
+                {arb.note && (
+                  <div className="mt-1 text-sm text-[var(--muted)]">{arb.note}</div>
+                )}
+              </div>
+              <div className="text-right">
+                <div className="tnum serif text-2xl text-[var(--gold-soft)]">
+                  {gbp(arb.totalSavingGBP)}
+                </div>
+                <div className="text-xs text-[var(--muted)]">
+                  saved ({gbp(arb.savingPerBottleGBP)}/btl)
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Alternatives */}
-          {data.alternatives.length > 0 && (
+          {alts.length > 0 && (
             <div className="rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-5">
               <div className="mb-3 text-xs uppercase tracking-wider text-[var(--muted)]">
                 Other sources considered
               </div>
               <div className="divide-y divide-[var(--border)]">
-                {data.alternatives.map((a, i) => (
+                {alts.map((a, i) => (
                   <div
                     key={i}
                     className="flex items-center justify-between gap-3 py-2.5 text-sm"
                   >
                     <div>
                       <span className="text-[var(--text)]">
-                        {flag(a.country)} {a.supplier}
+                        {flag(a?.country)} {a?.supplier}
                       </span>
-                      <span className="ml-2 text-[var(--muted)]">{a.note}</span>
+                      {a?.note && (
+                        <span className="ml-2 text-[var(--muted)]">{a.note}</span>
+                      )}
                     </div>
-                    <div className="tnum text-right text-[var(--muted)]">
-                      {gbp(a.landedUnitGBP)}/btl
+                    <div className="tnum whitespace-nowrap text-right text-[var(--muted)]">
+                      {gbp(a?.landedUnitGBP)}/btl
                     </div>
                   </div>
                 ))}
@@ -262,13 +321,13 @@ export default function Home() {
           )}
 
           {/* Caveats */}
-          {data.caveats.length > 0 && (
+          {caveats.length > 0 && (
             <div className="rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-5">
               <div className="mb-2 text-xs uppercase tracking-wider text-[var(--muted)]">
                 Watch-outs
               </div>
               <ul className="space-y-1.5 text-sm text-[var(--muted)]">
-                {data.caveats.map((c, i) => (
+                {caveats.map((c, i) => (
                   <li key={i} className="flex gap-2">
                     <span className="text-[var(--gold)]">▸</span>
                     {c}
@@ -279,12 +338,21 @@ export default function Home() {
           )}
 
           {/* Summary */}
-          <p className="serif border-l-2 border-[var(--gold)] pl-4 text-[15px] italic leading-relaxed text-[var(--text)]">
-            {data.summary}
-          </p>
+          {data?.summary && (
+            <p className="serif border-l-2 border-[var(--gold)] pl-4 text-[15px] italic leading-relaxed text-[var(--text)]">
+              {data.summary}
+            </p>
+          )}
+
+          {/* Streaming shimmer */}
+          {loading && !done && (
+            <p className="animate-pulse text-xs text-[var(--muted)]">
+              {status || "Refining the analysis…"}
+            </p>
+          )}
 
           {/* Agent trace */}
-          {trace.length > 0 && (
+          {done && trace.length > 0 && (
             <details className="rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-4 text-sm">
               <summary className="cursor-pointer text-[var(--muted)]">
                 How the agent worked ({trace.length} tool call
@@ -293,8 +361,7 @@ export default function Home() {
               <ol className="mt-3 space-y-2">
                 {trace.map((t, i) => (
                   <li key={i} className="font-mono text-xs text-[var(--muted)]">
-                    <span className="text-[var(--gold-soft)]">{t.tool}</span>(
-                    {JSON.stringify(t.input)})
+                    <span className="text-[var(--gold-soft)]">{t.tool}</span>()
                   </li>
                 ))}
               </ol>
