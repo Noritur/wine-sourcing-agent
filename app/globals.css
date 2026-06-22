@@ -1,26 +1,38 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+  --bg: #0e0b0c;
+  --panel: #171113;
+  --panel-2: #1d1517;
+  --border: #2c2023;
+  --gold: #c8a24a;
+  --gold-soft: #e3c987;
+  --wine: #6e1f33;
+  --text: #ece5e2;
+  --muted: #9a8d88;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  background:
+    radial-gradient(1100px 600px at 80% -10%, rgba(110, 31, 51, 0.35), transparent 60%),
+    radial-gradient(900px 500px at 0% 0%, rgba(200, 162, 74, 0.08), transparent 55%),
+    var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+.serif {
+  font-family: "Hoefler Text", "Iowan Old Style", Garamond, Georgia, "Times New Roman", serif;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
 }
